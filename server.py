@@ -138,9 +138,10 @@ def pick_encoder(encoder="auto", profile="auto"):
 class Stream:
     def __init__(self, channel, url, encoder):
         self.channel = channel
-        self.dir = WORK / channel
-        shutil.rmtree(self.dir, ignore_errors=True)
-        self.dir.mkdir(parents=True)
+        # A unique directory per stream instance: when a stop and a restart of
+        # the same channel overlap, the old stream's cleanup must not delete
+        # the new stream's files (ffmpeg would die with ENOENT, exit 254).
+        self.dir = Path(tempfile.mkdtemp(prefix=f"{channel}-", dir=WORK))
         self.last_access = self.started = time.time()
         self.stopped = False
         self.log = open(self.dir / "ffmpeg.log", "w")
