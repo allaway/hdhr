@@ -595,7 +595,9 @@ async function updateDebug() {
     "│" + row("sig qual", "sigq", P, 0, 100),
     "│",
     "├─ TRANSCODE · ffmpeg " + "─".repeat(HIST_N - 4),
-    `│ encoder   ${encArg("-c:v")}  target ${encArg("-b:v")}  max ${encArg("-maxrate")}` +
+    `│ profile   ${st.profile ?? "—"}   ${encArg("-c:v")}` +
+      (encArg("-b:v") !== "—" ? `  target ${encArg("-b:v")}` : `  crf ${encArg("-crf")} ${encArg("-preset")}`) +
+      `  max ${encArg("-maxrate")}` +
       (lastFrag ? `   seg load ${lastFrag.ms.toFixed(0)} ms` : ""),
     "│ output bitrate (Mbps)",
     ...chart(hist.out, 5).map(l => "│" + l),

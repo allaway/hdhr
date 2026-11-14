@@ -17,6 +17,32 @@ Options:
 - `--device http://<hdhomerun-ip>` skips auto-discovery
 - `--host 0.0.0.0` lets other devices on your LAN (phones, TVs, VPN clients) use it
 - `--port 8080`
+- `--profile auto|full|balanced|lite`: transcoding quality vs CPU (see below)
+- `--encoder auto|videotoolbox|v4l2m2m|vaapi|x264`
+
+## Profiles and low-power devices
+
+Nearly all the CPU goes to deinterlacing and H.264 encoding. Decoding MPEG-2, converting audio, and the Python server itself are cheap. So the profiles trade output resolution and encoder effort:
+
+| Profile | Video | Hardware encoder | Software (x264) |
+|---|---|---|---|
+| `full` | 1080p30 / 720p60 | 10 Mbps | veryfast |
+| `balanced` | ≤720p | 6 Mbps | superfast |
+| `lite` | ≤720p, fast scaler | 4 Mbps | ultrafast |
+
+All profiles deinterlace with `bwdif` (about 3× cheaper than `yadif` at similar quality), and only for frames that are interlaced, so 720p60 channels pass through at full frame rate.
+
+`auto` picks the first hardware encoder that passes a test encode (VideoToolbox on macOS, V4L2 on a Raspberry Pi 4, VA-API on Intel/AMD Linux). It then uses `full` with that encoder, `lite` with x264 on ARM boards, and `balanced` otherwise.
+
+Measured on an Apple M-series Mac (ffmpeg CPU, % of one core, per stream):
+
+| Setup | 1080i channel | 720p channel |
+|---|---|---|
+| VideoToolbox `full` (1080p) | ~19% | — |
+| x264 `lite` (720p) | ~29% | ~28% |
+| x264 at 1080p (old default) | ~156% | — |
+
+A Raspberry Pi core is several times slower than these, so on a Pi 5 (no hardware encoder) use `lite`. On a Pi 4, the hardware encoder (`v4l2m2m`) handles the encode. The V4L2 and VA-API paths haven't been tested on real hardware yet.
 
 ## Features
 

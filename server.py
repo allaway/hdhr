@@ -9,6 +9,8 @@ so any browser can play it. Standard library only; needs ffmpeg on PATH.
 """
 import argparse
 import json
+import os
+import platform
 import re
 import shutil
 import signal
@@ -45,14 +47,92 @@ def discover():
     return None
 
 
-def pick_encoder():
-    out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
-                         capture_output=True, text=True).stdout
-    if "h264_videotoolbox" in out:
-        return ["-c:v", "h264_videotoolbox", "-realtime", "1", "-b:v", "10M",
-                "-maxrate", "20M", "-profile:v", "high"]
-    return ["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
-            "-crf", "22", "-maxrate", "20M", "-bufsize", "40M"]
+# ── Transcoding profiles ────────────────────────────────────────────────
+# Nearly all the CPU goes to deinterlacing and H.264 encoding (measured on
+# 20 s of 1080i MPEG-2, one core: decode 0.8 s, yadif 6.2 s, bwdif 1.9 s,
+# x264 veryfast 1080p ~21 s). So profiles trade resolution and encoder
+# effort; bwdif replaces yadif everywhere (3x cheaper, similar quality).
+# deint=interlaced leaves progressive (720p) channels untouched.
+PROFILES = {
+    #            output height, scaler,          HW bitrate, HW max, x264 preset/crf/max
+    "full":     dict(height=None, scaler="bicubic",       br="10M", maxrate="20M",
+                     x264=("veryfast", "21", "20M")),
+    "balanced": dict(height=720,  scaler="bicubic",       br="6M",  maxrate="10M",
+                     x264=("superfast", "22", "8M")),
+    "lite":     dict(height=720,  scaler="fast_bilinear", br="4M",  maxrate="6M",
+                     x264=("ultrafast", "23", "5M")),
+}
+
+VAAPI_DEVICE = "/dev/dri/renderD128"
+
+
+class Encoder:
+    """ffmpeg arguments for one H.264 encoder at one profile."""
+
+    def __init__(self, name, profile):
+        self.name, self.profile = name, profile
+        p = PROFILES[profile]
+        vf = "bwdif=mode=send_frame:deint=interlaced"
+        if p["height"]:
+            vf += f",scale=-2:'min({p['height']},ih)':flags={p['scaler']}"
+        self.pre_input = []
+        if name == "videotoolbox":
+            self.args = ["-c:v", "h264_videotoolbox", "-realtime", "1",
+                         "-b:v", p["br"], "-maxrate", p["maxrate"], "-profile:v", "high"]
+        elif name == "v4l2m2m":  # Raspberry Pi 4 (and other V4L2 hardware)
+            vf += ",format=yuv420p"
+            self.args = ["-c:v", "h264_v4l2m2m", "-b:v", p["br"]]
+        elif name == "vaapi":    # Intel/AMD on Linux
+            self.pre_input = ["-vaapi_device", VAAPI_DEVICE]
+            vf += ",format=nv12,hwupload"
+            self.args = ["-c:v", "h264_vaapi", "-b:v", p["br"], "-maxrate", p["maxrate"]]
+        else:                    # software
+            preset, crf, maxrate = p["x264"]
+            self.args = ["-c:v", "libx264", "-preset", preset, "-tune", "zerolatency",
+                         "-crf", crf, "-maxrate", maxrate,
+                         "-bufsize", maxrate]
+        self.vf = vf
+
+    @property
+    def hardware(self):
+        return self.name != "x264"
+
+    def __str__(self):
+        return f"{self.name}/{self.profile}"
+
+
+def encoder_works(name):
+    """Test-encode a few frames: an encoder can be listed but unusable."""
+    enc = Encoder(name, "lite")
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", *enc.pre_input,
+           "-f", "lavfi", "-i", "testsrc2=s=640x360:d=0.3",
+           "-vf", enc.vf.split(",", 1)[1], *enc.args,
+           "-f", "null", "-"]
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=15).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def pick_encoder(encoder="auto", profile="auto"):
+    if encoder == "auto":
+        listed = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                                capture_output=True, text=True).stdout
+        candidates = [n for n, codec in (("videotoolbox", "h264_videotoolbox"),
+                                         ("v4l2m2m", "h264_v4l2m2m"),
+                                         ("vaapi", "h264_vaapi"))
+                      if codec in listed]
+        if "h264_vaapi" in listed and not os.path.exists(VAAPI_DEVICE):
+            candidates.remove("vaapi")
+        encoder = next((n for n in candidates if encoder_works(n)), "x264")
+    if profile == "auto":
+        if encoder != "x264":
+            profile = "full"
+        elif sys.platform.startswith("linux") and platform.machine() in ("aarch64", "armv7l"):
+            profile = "lite"       # Raspberry Pi and similar boards
+        else:
+            profile = "balanced"
+    return Encoder(encoder, profile)
 
 
 class Stream:
@@ -67,10 +147,11 @@ class Stream:
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
             "-fflags", "+genpts+discardcorrupt",
+            *encoder.pre_input,
             "-i", url,
             "-map", "0:v:0", "-map", "0:a:0?",
-            "-vf", "yadif=mode=0:deint=interlaced",
-            *encoder,
+            "-vf", encoder.vf,
+            *encoder.args,
             "-g", "60", "-force_key_frames", "expr:gte(t,n_forced*2)",
             # Fill gaps from dropped packets (e.g. Wi-Fi hiccups) with silence
             # so audio timestamps stay continuous and playback doesn't stutter.
@@ -117,12 +198,12 @@ class Stream:
 
 
 class Manager:
-    def __init__(self, device):
+    def __init__(self, device, encoder):
         self.device = device.rstrip("/")
         info = fetch_json(self.device + "/discover.json")
         self.info = info
         self.max_streams = int(info.get("TunerCount", 1))
-        self.encoder = pick_encoder()
+        self.encoder = encoder
         self.streams = {}
         self.lock = threading.Lock()
         self._lineup = None
@@ -262,7 +343,8 @@ class Handler(SimpleHTTPRequestHandler):
                 tuners = fetch_json(self.mgr.device + "/status.json", timeout=3)
             except Exception as e:
                 tuners = {"error": str(e)}
-            return self.send_json({"tuners": tuners, "encoder": self.mgr.encoder,
+            return self.send_json({"tuners": tuners, "encoder": self.mgr.encoder.args,
+                                   "profile": str(self.mgr.encoder),
                                    "active": list(self.mgr.streams)})
         if path == "/api/guide":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -337,6 +419,12 @@ def main():
     ap.add_argument("--host", default="127.0.0.1",
                     help="use 0.0.0.0 to allow other devices on your LAN")
     ap.add_argument("--device", help="HDHomeRun base URL, e.g. http://<hdhomerun-ip>")
+    ap.add_argument("--profile", default="auto", choices=["auto", *PROFILES],
+                    help="full = 1080p, balanced/lite = 720p with cheaper encoding "
+                         "(auto: full with a hardware encoder, lite on ARM boards)")
+    ap.add_argument("--encoder", default="auto",
+                    choices=["auto", "videotoolbox", "v4l2m2m", "vaapi", "x264"],
+                    help="H.264 encoder (auto: first working hardware encoder, else x264)")
     args = ap.parse_args()
 
     if not shutil.which("ffmpeg"):
@@ -345,9 +433,12 @@ def main():
     if not device:
         sys.exit("No HDHomeRun found; pass --device http://<ip>")
 
-    Handler.mgr = mgr = Manager(device)
+    encoder = pick_encoder(args.encoder, args.profile)
+    if args.encoder != "auto" and args.encoder != "x264" and not encoder_works(args.encoder):
+        sys.exit(f"encoder {args.encoder} doesn't work on this machine")
+    Handler.mgr = mgr = Manager(device, encoder)
     print(f"{mgr.info.get('FriendlyName')} at {device} "
-          f"({mgr.max_streams} tuners, encoder: {mgr.encoder[1]})")
+          f"({mgr.max_streams} tuners, encoder: {encoder})")
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True
 
