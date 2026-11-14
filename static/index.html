@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Antenna TV</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1c2029; --line: #262a33; --text: #e6e8ec;
+    --muted: #8a909c; --accent: #4f9cff; --star: #f5c542; --err: #ff6b6b;
+    --ppm: 4px; /* guide pixels per minute */
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text);
+         font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         display: grid; grid-template-columns: 320px 1fr; overflow: hidden; }
+  button { font: inherit; }
+
+  /* ---------- sidebar ---------- */
+  aside { background: var(--panel); border-right: 1px solid var(--line);
+          display: flex; flex-direction: column; min-height: 0; height: 100vh; }
+  header { padding: 14px 14px 10px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0 0 2px; }
+  header .dev { color: var(--muted); font-size: 12px; }
+  .filters { display: flex; gap: 6px; margin-top: 10px; }
+  input[type=search] { flex: 1; min-width: 0; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: inherit; }
+  .tog { background: var(--bg); color: var(--muted); border: 1px solid var(--line);
+    border-radius: 6px; padding: 0 10px; cursor: pointer; }
+  .tog.on { color: var(--star); border-color: var(--star); }
+  .tog.guide.on { color: var(--accent); border-color: var(--accent); }
+  #list { list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; flex: 1; }
+  #list li { display: grid; grid-template-columns: 48px 1fr auto; gap: 10px; align-items: center;
+             padding: 7px 12px; cursor: pointer; }
+  #list li:hover { background: #1e222b; }
+  #list li.active { background: #1d2a40; box-shadow: inset 3px 0 var(--accent); }
+  .logo { width: 48px; height: 30px; display: flex; align-items: center; justify-content: center;
+          background: #252a35; border-radius: 4px; overflow: hidden; flex: none; }
+  .logo img { max-width: 44px; max-height: 26px; object-fit: contain; }
+  .logo span { font-size: 10px; font-weight: 700; color: var(--muted); letter-spacing: .03em; }
+  .info { min-width: 0; }
+  .l1 { display: flex; gap: 6px; align-items: baseline; white-space: nowrap; overflow: hidden; }
+  .l1 .num { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .l1 .name { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+  .l1 .aff { font-size: 10px; color: var(--accent); border: 1px solid #2c4a75; border-radius: 3px; padding: 0 3px; }
+  .l2 { font-size: 12px; color: #c3c7cf; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prog { height: 2px; background: #2a2f3a; border-radius: 1px; margin-top: 3px; }
+  .prog i { display: block; height: 100%; background: var(--accent); border-radius: 1px; }
+  .fav { background: none; border: 0; color: #4a4f5a; cursor: pointer; font-size: 15px; padding: 0 2px; }
+  .fav.on { color: var(--star); }
+
+  /* ---------- main ---------- */
+  main { display: grid; grid-template-rows: 1fr auto; min-width: 0; height: 100vh; }
+  body.guide-open main { grid-template-rows: minmax(160px, 42vh) auto 1fr; }
+  .stage { position: relative; background: #000; min-height: 0; }
+  video { width: 100%; height: 100%; display: block; background: #000; }
+  .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+             pointer-events: none; color: var(--muted); font-size: 16px; text-align: center; padding: 20px; }
+  .overlay.err { color: var(--err); }
+  .spinner { width: 28px; height: 28px; border: 3px solid #333; border-top-color: var(--accent);
+             border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 10px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #dbg { position: absolute; top: 10px; left: 10px; margin: 0; padding: 10px 12px; z-index: 5;
+         background: rgba(0,0,0,.78); border: 1px solid #333; border-radius: 6px; color: #d7f5d7;
+         font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; pointer-events: none;
+         max-width: calc(100% - 20px); max-height: calc(100% - 20px); overflow: hidden; white-space: pre; }
+  #dbg[hidden] { display: none; }
+  #unmute { position: absolute; right: 12px; top: 12px; z-index: 6; padding: 6px 12px; cursor: pointer;
+            background: rgba(0,0,0,.75); color: #fff; border: 1px solid #444; border-radius: 16px; font-size: 13px; }
+  #unmute[hidden] { display: none; }
+
+  .bar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; min-width: 0;
+         border-top: 1px solid var(--line); background: var(--panel); }
+  .bar .logo { width: 56px; height: 34px; }
+  .bar .logo img { max-width: 52px; max-height: 30px; }
+  .bar .np { min-width: 0; flex: 1; }
+  .bar .t1 { display: flex; gap: 8px; align-items: baseline; white-space: nowrap; overflow: hidden; }
+  .bar .ch { font-weight: 700; }
+  .bar .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+  .bar .when { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .bar .syn { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar .keys { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  kbd { border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; font: 11px monospace; }
+
+  /* ---------- guide grid ---------- */
+  #guide { display: none; min-height: 0; border-top: 1px solid var(--line); background: var(--bg);
+           flex-direction: column; }
+  body.guide-open #guide { display: flex; }
+  .g-tools { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--panel);
+             border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .g-tools .tog { padding: 2px 10px; }
+  .g-tools .msg { margin-left: auto; }
+  .g-scroll { flex: 1; overflow: auto; position: relative; }
+  .g-grid { position: relative; }
+  .g-times, .g-row { display: flex; height: 52px; }
+  .g-times { height: 28px; position: sticky; top: 0; z-index: 3; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .g-corner, .g-ch { width: 150px; flex: none; position: sticky; left: 0; z-index: 2;
+                     background: var(--panel); border-right: 1px solid var(--line); }
+  .g-corner { z-index: 4; }
+  .g-ch { display: flex; align-items: center; gap: 8px; padding: 0 8px; cursor: pointer;
+          border-bottom: 1px solid var(--line); }
+  .g-ch .num { font-weight: 600; font-variant-numeric: tabular-nums; font-size: 12px; }
+  .g-ch .nm { font-size: 11px; color: var(--muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .g-row.active .g-ch { box-shadow: inset 3px 0 var(--accent); background: #1d2a40; }
+  .g-track { position: relative; flex: none; border-bottom: 1px solid var(--line); }
+  .g-tick { position: absolute; top: 0; bottom: 0; padding: 6px 6px; font-size: 11px; color: var(--muted);
+            border-left: 1px solid var(--line); white-space: nowrap; }
+  .g-p { position: absolute; top: 3px; bottom: 3px; background: var(--panel2); border: 1px solid #2a2f3a;
+         border-radius: 4px; padding: 4px 7px; overflow: hidden; cursor: pointer; }
+  .g-p:hover { border-color: var(--accent); }
+  .g-p.now { background: #1f2c42; border-color: #2c4a75; }
+  .g-p.past { opacity: .45; }
+  .g-p .pt { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .g-p .ps { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .g-p.sports .pt::before { content: "● "; color: #4fd18b; font-size: 9px; }
+  .g-none { position: absolute; left: 8px; top: 16px; font-size: 11px; color: #555b66; }
+  .g-nowline { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--err); z-index: 1; pointer-events: none; }
+
+  @media (max-width: 760px) {
+    body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; overflow: auto; }
+    main, body.guide-open main { order: -1; height: auto; grid-template-rows: 36vh auto auto; }
+    body.guide-open #guide { height: 60vh; }
+    aside { height: auto; }
+    .bar .keys { display: none; }
+  }
+</style>
+</head>
+<body>
+<aside>
+  <header>
+    <h1>Antenna TV</h1>
+    <div class="filters">
+      <input type="search" id="q" placeholder="Search channels or shows" autocomplete="off">
+      <button class="tog" id="favOnly" title="Favorites only">★</button>
+      <button class="tog guide" id="guideBtn" title="TV guide (G)">Guide</button>
+    </div>
+  </header>
+  <ul id="list"></ul>
+</aside>
+<main>
+  <div class="stage">
+    <video id="v" controls autoplay playsinline></video>
+    <div class="overlay" id="ov">Pick a channel</div>
+    <pre id="dbg" hidden></pre>
+    <button id="unmute" hidden>🔇 Click anywhere for sound</button>
+  </div>
+  <div class="bar">
+    <div class="logo" id="npLogo"><span>TV</span></div>
+    <div class="np">
+      <div class="t1"><span class="ch" id="npCh">—</span><span class="title" id="npTitle"></span><span class="when" id="npWhen"></span></div>
+      <div class="syn" id="npSyn"></div>
+    </div>
+    <span class="keys"><kbd>G</kbd> guide · <kbd>I</kbd> info · <kbd>F</kbd> full · <kbd>M</kbd> mute</span>
+  </div>
+  <section id="guide">
+    <div class="g-tools">
+      <button class="tog" id="gNow">Now</button>
+      <span id="gDay"></span>
+      <span class="msg" id="gMsg"></span>
+    </div>
+    <div class="g-scroll" id="gScroll"><div class="g-grid" id="gGrid"></div></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const video = $("v"), ov = $("ov");
+const store = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+let channels = [], current = null, hls = null;
+let favs = new Set(store.get("favs", []));
+let favOnly = store.get("favOnly", false);
+
+/* ---------------- guide data ---------------- */
+// GuideNumber -> { logo, affiliate, programs: [{StartTime, EndTime, Title, ...}] }
+const guide = new Map();
+let guideEnd = 0, guideLoading = false, guideExhausted = false;
+const nowSec = () => Date.now() / 1000;
+
+async function loadGuide(start) {
+  if (guideLoading) return false;
+  guideLoading = true;
+  try {
+    const r = await fetch("/api/guide" + (start ? `?start=${Math.floor(start)}` : ""));
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error);
+    const before = guideEnd;
+    for (const c of data) {
+      let g = guide.get(c.GuideNumber);
+      if (!g) guide.set(c.GuideNumber, g = { programs: [] });
+      g.logo = c.ImageURL || g.logo;
+      g.affiliate = c.Affiliate || g.affiliate;
+      const seen = new Set(g.programs.map(p => p.StartTime));
+      for (const p of c.Guide || []) {
+        if (!seen.has(p.StartTime)) g.programs.push(p);
+        guideEnd = Math.max(guideEnd, p.EndTime);
+      }
+      g.programs.sort((a, b) => a.StartTime - b.StartTime);
+    }
+    if (start && guideEnd <= before) guideExhausted = true;
+    $("gMsg").textContent = "";
+    return true;
+  } catch (e) {
+    if (start) { guideExhausted = true; $("gMsg").textContent = "End of available guide data"; }
+    else $("gMsg").textContent = "Guide unavailable: " + e.message;
+    return false;
+  } finally { guideLoading = false; }
+}
+
+function programAt(ch, t = nowSec()) {
+  const g = guide.get(ch);
+  return g?.programs.find(p => p.StartTime <= t && t < p.EndTime);
+}
+
+const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const fmtDay = (t) => new Date(t * 1000).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+const progTitle = (p) => p.EpisodeTitle ? `${p.Title} — ${p.EpisodeTitle}` : p.Title;
+
+function logoEl(ch, cls = "logo") {
+  const box = el("div", cls);
+  const g = guide.get(ch.GuideNumber);
+  if (g?.logo) {
+    const img = el("img"); img.alt = ""; img.loading = "lazy"; img.src = g.logo;
+    img.onerror = () => { img.replaceWith(el("span", null, g.affiliate || ch.GuideName.slice(0, 4))); };
+    box.appendChild(img);
+  } else {
+    box.appendChild(el("span", null, (g?.affiliate || ch.GuideName).slice(0, 5)));
+  }
+  return box;
+}
+
+/* ---------------- channel list ---------------- */
+function overlay(html, isErr = false) {
+  ov.innerHTML = html || "";
+  ov.className = "overlay" + (isErr ? " err" : "");
+  ov.style.display = html ? "flex" : "none";
+}
+
+function visible() {
+  const q = $("q").value.trim().toLowerCase();
+  return channels.filter(c => {
+    if (favOnly && !favs.has(c.GuideNumber)) return false;
+    if (!q) return true;
+    if (c.GuideNumber.startsWith(q) || c.GuideName.toLowerCase().includes(q)) return true;
+    const g = guide.get(c.GuideNumber);
+    if (g?.affiliate?.toLowerCase().includes(q)) return true;
+    const p = programAt(c.GuideNumber);
+    return p && progTitle(p).toLowerCase().includes(q);
+  });
+}
+
+function render() {
+  $("favOnly").classList.toggle("on", favOnly);
+  const list = $("list"), t = nowSec();
+  list.replaceChildren();
+  for (const c of visible()) {
+    const li = el("li");
+    li.dataset.ch = c.GuideNumber;
+    if (c.GuideNumber === current) li.classList.add("active");
+    const g = guide.get(c.GuideNumber), p = programAt(c.GuideNumber, t);
+
+    const info = el("div", "info");
+    const l1 = el("div", "l1");
+    l1.append(el("span", "num", c.GuideNumber), el("span", "name", c.GuideName));
+    if (g?.affiliate) l1.append(el("span", "aff", g.affiliate));
+    info.append(l1);
+    if (p) {
+      const l2 = el("div", "l2", progTitle(p));
+      l2.title = `${fmtTime(p.StartTime)}–${fmtTime(p.EndTime)}${p.Synopsis ? "\n" + p.Synopsis : ""}`;
+      const bar = el("div", "prog"), fill = el("i");
+      fill.style.width = Math.min(100, 100 * (t - p.StartTime) / (p.EndTime - p.StartTime)) + "%";
+      bar.append(fill);
+      info.append(l2, bar);
+    }
+    const fav = el("button", "fav" + (favs.has(c.GuideNumber) ? " on" : ""), "★");
+    fav.title = "Favorite";
+    fav.onclick = (e) => {
+      e.stopPropagation();
+      favs.has(c.GuideNumber) ? favs.delete(c.GuideNumber) : favs.add(c.GuideNumber);
+      store.set("favs", [...favs]);
+      render(); renderGuide();
+    };
+    li.append(logoEl(c), info, fav);
+    li.onclick = () => tune(c.GuideNumber);
+    list.appendChild(li);
+  }
+  if (!list.children.length) list.append(Object.assign(el("li", null, "No channels"), { style: "color:var(--muted);cursor:default" }));
+}
+
+function renderNowPlaying() {
+  const c = channels.find(x => x.GuideNumber === current);
+  if (!c) return;
+  const p = programAt(current);
+  $("npLogo").replaceWith(Object.assign(logoEl(c), { id: "npLogo" }));
+  $("npCh").textContent = `${c.GuideNumber} ${c.GuideName}`;
+  $("npTitle").textContent = p ? progTitle(p) : "";
+  $("npWhen").textContent = p ? `${fmtTime(p.StartTime)}–${fmtTime(p.EndTime)}` : "";
+  $("npSyn").textContent = p?.Synopsis || "";
+  $("npSyn").title = p?.Synopsis || "";
+  document.title = `${c.GuideNumber} ${p ? p.Title : c.GuideName} · Antenna TV`;
+}
+
+/* ---------------- guide grid ---------------- */
+const PPM = 4, CHW = 150;           // px per minute, channel column width
+let gridT0 = 0;                     // unix time at the grid's left edge
+
+function renderGuide() {
+  if (!document.body.classList.contains("guide-open")) return;
+  const scroll = $("gScroll"), keepX = scroll.scrollLeft, keepY = scroll.scrollTop;
+  const t = nowSec();
+  gridT0 = gridT0 || Math.floor(t / 1800) * 1800 - 1800;
+  const t1 = Math.max(guideEnd, gridT0 + 4 * 3600);
+  const trackW = (t1 - gridT0) / 60 * PPM;
+  const x = (s) => (s - gridT0) / 60 * PPM;
+
+  const grid = $("gGrid");
+  grid.replaceChildren();
+  grid.style.width = CHW + trackW + "px";
+
+  // time header
+  const head = el("div", "g-times");
+  const hTrack = el("div", "g-track"); hTrack.style.width = trackW + "px"; hTrack.style.borderBottom = "0";
+  for (let s = gridT0; s < t1; s += 1800) {
+    const tick = el("div", "g-tick", fmtTime(s));
+    tick.style.left = x(s) + "px";
+    hTrack.append(tick);
+  }
+  head.append(el("div", "g-corner"), hTrack);
+  grid.append(head);
+
+  for (const c of visible()) {
+    const row = el("div", "g-row" + (c.GuideNumber === current ? " active" : ""));
+    const chCell = el("div", "g-ch");
+    const meta = el("div"); meta.style.minWidth = "0";
+    meta.append(el("div", "num", c.GuideNumber), el("div", "nm", c.GuideName));
+    chCell.append(logoEl(c), meta);
+    chCell.onclick = () => tune(c.GuideNumber);
+    const track = el("div", "g-track"); track.style.width = trackW + "px";
+    const progs = (guide.get(c.GuideNumber)?.programs || []).filter(p => p.EndTime > gridT0);
+    if (!progs.length) track.append(el("div", "g-none", "No guide data"));
+    for (const p of progs) {
+      const left = Math.max(0, x(p.StartTime)), w = x(p.EndTime) - left;
+      const cls = ["g-p"];
+      if (p.StartTime <= t && t < p.EndTime) cls.push("now");
+      else if (p.EndTime <= t) cls.push("past");
+      if (p.Filter?.includes("Sports")) cls.push("sports");
+      const b = el("div", cls.join(" "));
+      b.style.left = left + 1 + "px"; b.style.width = Math.max(4, w - 2) + "px";
+      b.append(el("div", "pt", p.Title));
+      const sub = p.EpisodeTitle || `${fmtTime(p.StartTime)}–${fmtTime(p.EndTime)}`;
+      if (w > 60) b.append(el("div", "ps", sub));
+      b.title = `${progTitle(p)}\n${fmtTime(p.StartTime)}–${fmtTime(p.EndTime)}${p.Synopsis ? "\n\n" + p.Synopsis : ""}`;
+      b.onclick = () => tune(c.GuideNumber);
+      track.append(b);
+    }
+    row.append(chCell, track);
+    grid.append(row);
+  }
+
+  const line = el("div", "g-nowline");
+  line.style.left = CHW + x(t) + "px";
+  grid.append(line);
+  scroll.scrollLeft = keepX; scroll.scrollTop = keepY;
+  updateDayLabel();
+}
+
+function updateDayLabel() {
+  const s = $("gScroll");
+  $("gDay").textContent = fmtDay(gridT0 + (s.scrollLeft / PPM) * 60);
+}
+
+$("gScroll").addEventListener("scroll", async () => {
+  updateDayLabel();
+  const s = $("gScroll");
+  if (!guideExhausted && s.scrollLeft + s.clientWidth > s.scrollWidth - 600) {
+    if (await loadGuide(guideEnd)) renderGuide();
+  }
+});
+
+function toggleGuide(open = !document.body.classList.contains("guide-open")) {
+  document.body.classList.toggle("guide-open", open);
+  $("guideBtn").classList.toggle("on", open);
+  store.set("guideOpen", open);
+  if (open) { renderGuide(); scrollGuideToNow(); }
+}
+
+function scrollGuideToNow() {
+  const s = $("gScroll");
+  s.scrollLeft = Math.max(0, (nowSec() - gridT0) / 60 * PPM - 60);
+  const row = s.querySelector(".g-row.active");
+  if (row) s.scrollTop = Math.max(0, row.offsetTop - s.clientHeight / 2);
+}
+
+/* ---------------- playback ---------------- */
+function stopCurrent(release = true) {
+  if (hls) { hls.destroy(); hls = null; }
+  video.removeAttribute("src"); video.load();
+  if (current && release) navigator.sendBeacon(`/api/stop/${current}`);
+}
+
+async function tune(ch, force = false) {
+  if (ch === current && !force) return;
+  stopCurrent(ch !== current);  // retuning the same channel: keep the server stream
+  current = ch;
+  frags = []; tunedAt = performance.now(); firstFrameMs = null; hist = {}; lastDropped = null;
+  stalledFor = -20; lastPos = -1;  // grace period while tuning
+  store.set("last", ch);
+  renderNowPlaying();
+  render(); renderGuide();
+  document.querySelector("#list li.active")?.scrollIntoView({ block: "nearest" });
+  overlay('<div><div class="spinner"></div>Tuning ' + ch + "…</div>");
+
+  const src = `/hls/${ch}/index.m3u8`;
+  // Ask the server first so tuner errors come back as readable messages.
+  const r = await fetch(src);
+  if (current !== ch) return;
+  if (!r.ok) {
+    let msg = `Error ${r.status}`;
+    try { msg = (await r.json()).error; } catch {}
+    return overlay(msg, true);
+  }
+
+  if (window.Hls && Hls.isSupported()) {
+    hls = new Hls({ liveSyncDurationCount: 2, maxLiveSyncPlaybackRate: 1.1,
+                    manifestLoadingTimeOut: 30000 });
+    hls.on(Hls.Events.ERROR, (_, d) => {
+      if (!d.fatal) return;
+      if (d.type === Hls.ErrorTypes.MEDIA_ERROR) return hls.recoverMediaError();
+      // Network trouble (e.g. server restarted): retune after a moment.
+      overlay('<div><div class="spinner"></div>Reconnecting…</div>');
+      setTimeout(() => { if (current === ch) tune(ch, true); }, 3000);
+    });
+    hls.on(Hls.Events.FRAG_LOADED, (_, d) => {
+      frags.push({ bytes: d.frag.stats.total, dur: d.frag.duration,
+                   ms: d.frag.stats.loading.end - d.frag.stats.loading.start });
+      if (frags.length > 10) frags.shift();
+    });
+    hls.loadSource(src);
+    hls.attachMedia(video);
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = src; // Safari plays HLS natively
+  } else {
+    return overlay("This browser can't play HLS.", true);
+  }
+  video.muted = store.get("muted", false);
+  video.volume = store.get("volume", 1);
+  video.play().catch(() => {
+    // Browsers block autoplay with sound until the page gets a click or
+    // keypress. Start muted and unmute on the first interaction.
+    video.muted = true; autoMuted = true;
+    $("unmute").hidden = false;
+    video.play().catch(() => {});
+  });
+}
+
+video.addEventListener("playing", () => {
+  overlay("");
+  if (firstFrameMs == null) firstFrameMs = performance.now() - tunedAt;
+});
+
+// Sound: remember mute/volume, and undo an autoplay-forced mute on the
+// first click or keypress anywhere on the page.
+let autoMuted = false;
+function undoAutoMute() {
+  if (!autoMuted) return;
+  autoMuted = false;
+  video.muted = store.get("muted", false);
+  $("unmute").hidden = true;
+}
+document.addEventListener("pointerdown", undoAutoMute, true);
+document.addEventListener("keydown", undoAutoMute, true);
+video.addEventListener("volumechange", () => {
+  if (autoMuted) return;  // don't save the browser-forced mute
+  store.set("muted", video.muted);
+  store.set("volume", video.volume);
+});
+
+// Watchdog: if playback hasn't advanced for 12 s (stalled stream, server
+// restart, tuner hiccup), retune the same channel from scratch.
+let lastPos = -1, stalledFor = 0;
+setInterval(() => {
+  if (!current || video.paused && video.readyState >= 2) { stalledFor = 0; return; }
+  if (video.currentTime === lastPos) stalledFor += 2; else stalledFor = 0;
+  lastPos = video.currentTime;
+  if (stalledFor >= 12) { stalledFor = 0; tune(current, true); }
+}, 2000);
+
+/* ---------------- debug / info panel (I) ---------------- */
+let frags = [], tunedAt = 0, firstFrameMs = null, dbgTimer = null;
+const HIST_N = 60;  // one sample per second
+let hist = {};
+let lastDropped = null;
+
+// ── text plots ────────────────────────────────────────────────
+const BLOCKS = " ▁▂▃▄▅▆▇█";
+function push(key, v) { (hist[key] ??= []).push(v); if (hist[key].length > HIST_N) hist[key].shift(); }
+function spark(arr = [], lo, hi) {
+  const vals = arr.filter(v => v != null && isFinite(v));
+  if (!vals.length) return "·".repeat(HIST_N);
+  lo ??= Math.min(...vals); hi ??= Math.max(...vals);
+  const pad = " ".repeat(HIST_N - arr.length);
+  return pad + arr.map(v => {
+    if (v == null || !isFinite(v)) return " ";
+    const f = hi > lo ? (v - lo) / (hi - lo) : 0.5;
+    return BLOCKS[Math.max(1, Math.round(f * 8))];
+  }).join("");
+}
+function meter(pct, width = 20) {
+  const n = Math.round(Math.max(0, Math.min(100, pct)) / 100 * width);
+  return "█".repeat(n) + "░".repeat(width - n);
+}
+function chart(arr = [], rows = 5, label = (v) => v.toFixed(1)) {
+  const vals = arr.filter(v => v != null && isFinite(v));
+  if (!vals.length) return ["  (collecting…)"];
+  const hi = Math.max(...vals) * 1.1 || 1;
+  const cols = Array(HIST_N - arr.length).fill(null).concat(arr);
+  const out = [];
+  for (let r = 0; r < rows; r++) {
+    const rowBase = (rows - 1 - r) * 8;
+    const line = cols.map(v => {
+      if (v == null || !isFinite(v)) return " ";
+      const fill = Math.max(0, Math.min(8, Math.round(v / hi * rows * 8) - rowBase));
+      return BLOCKS[fill];
+    }).join("");
+    const axis = r === 0 ? label(hi) : r === rows - 1 ? label(0) : "";
+    out.push(axis.padStart(6) + " ┤" + line);
+  }
+  out.push(" ".repeat(7) + "└" + "─".repeat(HIST_N));
+  out.push(" ".repeat(8) + "-60s" + " ".repeat(HIST_N - 7) + "now");
+  return out;
+}
+const stats = (arr = []) => {
+  const v = arr.filter(x => x != null && isFinite(x));
+  return v.length ? { min: Math.min(...v), max: Math.max(...v), cur: v[v.length - 1] } : null;
+};
+const fmtStats = (s, f) => s ? `${f(s.cur).padStart(7)}  (${f(s.min)}–${f(s.max)})` : "";
+
+function toggleDebug(open = $("dbg").hidden) {
+  $("dbg").hidden = !open;
+  clearInterval(dbgTimer);
+  if (open) { updateDebug(); dbgTimer = setInterval(updateDebug, 1000); }
+}
+
+async function updateDebug() {
+  const c = channels.find(x => x.GuideNumber === current);
+  if (!c) { $("dbg").textContent = "No channel playing"; return; }
+  let st = {};
+  try { st = await fetch("/api/status").then(r => r.json()); } catch {}
+  if ($("dbg").hidden) return;
+  const tuner = Array.isArray(st.tuners)
+    ? st.tuners.find(t => t.VctNumber === current && t.TargetIP) : null;
+  const mbps = (bits) => (bits / 1e6).toFixed(2) + " Mbps";
+  const sec = (s) => (s == null || isNaN(s)) ? "—" : s.toFixed(1) + " s";
+
+  const outBytes = frags.reduce((a, f) => a + f.bytes, 0);
+  const outDur = frags.reduce((a, f) => a + f.dur, 0);
+  const lastFrag = frags[frags.length - 1];
+  const q = video.getVideoPlaybackQuality?.();
+  const buf = video.buffered.length ? video.buffered.end(video.buffered.length - 1) - video.currentTime : 0;
+  const lvl = hls?.levels?.[0];
+  const enc = (st.encoder || []);
+  const encArg = (k) => { const i = enc.indexOf(k); return i >= 0 ? enc[i + 1] : "—"; };
+
+  // record one sample per second for the plots
+  push("src", tuner ? tuner.NetworkRate / 1e6 : null);
+  push("out", lastFrag ? lastFrag.bytes * 8 / lastFrag.dur / 1e6 : null);
+  push("sigq", tuner ? tuner.SignalQualityPercent : null);
+  push("buf", buf);
+  push("lat", hls?.latency ?? null);
+  const dropped = q?.droppedVideoFrames ?? null;
+  push("drop", dropped != null && lastDropped != null ? Math.max(0, dropped - lastDropped) : null);
+  lastDropped = dropped;
+
+  const M = (v) => v.toFixed(1) + " Mb";
+  const S = (v) => v.toFixed(1) + " s";
+  const P = (v) => v.toFixed(0) + "%";
+  const N = (v) => v.toFixed(0);
+  const row = (name, key, f, lo, hi) => `  ${name.padEnd(9)} ${spark(hist[key], lo, hi)} ${fmtStats(stats(hist[key]), f)}`;
+
+  const lines = [
+    `● ${c.GuideNumber} ${c.GuideName}${guide.get(current)?.affiliate ? " · " + guide.get(current).affiliate : ""}` +
+      `   ${video.videoWidth}×${video.videoHeight}  ${hls ? "hls.js " + Hls.version : "native HLS"}`,
+    "",
+    "╭─ SOURCE · HDHomeRun " + "─".repeat(HIST_N - 4),
+    `│ codec     ${c.VideoCodec}/${c.AudioCodec}${c.HD ? " HD" : ""}` +
+      (tuner ? `   ${tuner.Resource} @ ${(tuner.Frequency / 1e6).toFixed(0)} MHz` : "   tuner: (not found)"),
+    tuner ? `│ strength  ${meter(tuner.SignalStrengthPercent)} ${tuner.SignalStrengthPercent}%` : "│",
+    tuner ? `│ quality   ${meter(tuner.SignalQualityPercent)} ${tuner.SignalQualityPercent}%   symbol ${tuner.SymbolQualityPercent}%` : "│",
+    "│" + row("bitrate", "src", M, 0),
+    "│" + row("sig qual", "sigq", P, 0, 100),
+    "│",
+    "├─ TRANSCODE · ffmpeg " + "─".repeat(HIST_N - 4),
+    `│ encoder   ${encArg("-c:v")}  target ${encArg("-b:v")}  max ${encArg("-maxrate")}` +
+      (lastFrag ? `   seg load ${lastFrag.ms.toFixed(0)} ms` : ""),
+    "│ output bitrate (Mbps)",
+    ...chart(hist.out, 5).map(l => "│" + l),
+    "│",
+    "├─ PLAYER " + "─".repeat(HIST_N + 8),
+    "│" + row("buffer", "buf", S, 0),
+    "│" + row("latency", "lat", S, 0),
+    "│" + row("dropped/s", "drop", N, 0),
+    `│ totals    ${q ? `${q.droppedVideoFrames} dropped / ${q.totalVideoFrames} frames` : "—"}` +
+      `   tune ${firstFrameMs != null ? (firstFrameMs / 1000).toFixed(1) + " s" : "—"}` +
+      `   window ${video.clientWidth}×${video.clientHeight}@${devicePixelRatio}x`,
+    "╰" + "─".repeat(HIST_N + 18),
+  ];
+  $("dbg").textContent = lines.filter((l, i) => l !== "" || lines[i - 1] !== "").join("\n");
+}
+video.addEventListener("waiting", () => { if (current) overlay('<div class="spinner"></div>'); });
+
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT") {
+    if (e.key === "Enter") { const v = visible(); if (v.length) tune(v[0].GuideNumber); e.target.blur(); }
+    if (e.key === "Escape") e.target.blur();
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "i") toggleDebug();
+  else if (e.key === "f") document.fullscreenElement ? document.exitFullscreen() : video.requestFullscreen();
+  else if (e.key === "m") video.muted = !video.muted;
+  else if (e.key === "g") toggleGuide();
+  else if (e.key === "Escape") toggleGuide(false);
+  else if (e.key === "/") { e.preventDefault(); $("q").focus(); }
+});
+
+$("q").addEventListener("input", () => { render(); renderGuide(); });
+$("favOnly").onclick = () => { favOnly = !favOnly; store.set("favOnly", favOnly); render(); renderGuide(); };
+$("guideBtn").onclick = () => toggleGuide();
+$("gNow").onclick = scrollGuideToNow;
+window.addEventListener("pagehide", () => { if (current) navigator.sendBeacon(`/api/stop/${current}`); });
+
+// Keep "now" info fresh: re-render every minute, refetch guide every 10.
+setInterval(() => { render(); renderNowPlaying(); renderGuide(); }, 60_000);
+setInterval(async () => { if (await loadGuide()) { render(); renderNowPlaying(); renderGuide(); } }, 600_000);
+
+(async () => {
+  try {
+    const list = await fetch("/api/channels").then(r => r.json());
+    channels = list.filter(c => !c.DRM);
+    render();
+    const last = store.get("last", null);
+    if (last && channels.some(c => c.GuideNumber === last)) tune(last);
+    if (await loadGuide()) { render(); renderNowPlaying(); }
+    if (store.get("guideOpen", false)) toggleGuide(true);
+  } catch (e) {
+    overlay("Couldn't load channel list.", true);
+  }
+})();
+</script>
+</body>
+</html>
