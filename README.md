@@ -32,6 +32,8 @@ It runs as a systemd service (`hdhr`) on port 8080, reachable from your LAN and 
 - **Segments live in RAM** (`/run/hdhr`), so constant HLS writes don't wear out the SD card. Use `--workdir` to choose another location.
 - **No internet needed to find the tuner.** Discovery uses the HDHomeRun's own LAN broadcast first and falls back to SiliconDust's cloud service. The guide still needs internet.
 - **No transcoding for nobody.** A stream stops when its last viewer changes channels or closes the page, or 30 s after the last request. A video paused for a minute releases its stream, and a tab left playing for 4 hours without interaction stops with a "Still watching?" prompt. Viewers on the same channel share one stream, and it keeps running until the last of them leaves.
+- **Raspberry Pi 4 hardware encoder:** it hangs (ffmpeg stuck in the kernel, so only a power cycle recovers it) when two streams use it at once. So only one stream at a time uses the hardware encoder. An extra simultaneous stream is encoded in software at 480p, the `spare` profile. If a stream stops producing video for 20 s, the server kills it and frees the tuner.
+- **Checking the encoder:** `deploy/check-encoder.sh` tests which encoder setups produce streams a browser can join mid-stream, and how fast each runs.
 - There's no login, so keep it on your LAN or VPN rather than exposing port 8080 to the internet.
 
 ## Profiles and low-power devices

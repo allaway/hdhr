@@ -112,6 +112,11 @@ PROFILES = {
                      x264=("superfast", "22", "8M")),
     "lite":     dict(height=720,  scaler="fast_bilinear", br="4M",  maxrate="6M",
                      x264=("ultrafast", "23", "5M")),
+    # Used for extra simultaneous streams on a Raspberry Pi while the one
+    # hardware-encoder slot is busy: software encoding at 720p on top of a
+    # hardware stream overloaded a Pi 4's CPU, so these drop to 480p.
+    "spare":    dict(height=480,  scaler="fast_bilinear", br="2M",  maxrate="3M",
+                     x264=("ultrafast", "24", "2500k")),
 }
 
 VAAPI_DEVICE = "/dev/dri/renderD128"
@@ -353,7 +358,7 @@ class Manager:
         stream uses the hardware; others use software x264 at 720p."""
         if self.encoder.name == "v4l2m2m" and any(
                 s.encoder.name == "v4l2m2m" for s in self.streams.values()):
-            return Encoder("x264", "lite")
+            return Encoder("x264", "spare")
         return self.encoder
 
     def get(self, channel):
