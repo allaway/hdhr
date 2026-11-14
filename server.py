@@ -517,7 +517,14 @@ def main():
     Handler.mgr = mgr = Manager(device, encoder)
     print(f"{mgr.info.get('FriendlyName')} at {device} "
           f"({mgr.max_streams} tuners, encoder: {encoder})")
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    try:
+        srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as e:
+        if e.errno in (48, 98):  # EADDRINUSE (macOS, Linux)
+            sys.exit(f"Port {args.port} is already in use by another program. "
+                     f"Pick another with --port (service: set HDHR_ARGS=\"--port N\" "
+                     f"in /etc/default/hdhr).")
+        raise
     srv.daemon_threads = True
 
     def _quit(*_):
