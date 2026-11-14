@@ -465,14 +465,22 @@ video.addEventListener("playing", () => {
 
 // Sound: remember mute/volume, and undo an autoplay-forced mute on the
 // first click or keypress anywhere on the page.
-let autoMuted = false;
-function undoAutoMute() {
+let autoMuted = false, swallowClick = false;
+function undoAutoMute(e) {
   if (!autoMuted) return;
   autoMuted = false;
   video.muted = store.get("muted", false);
   $("unmute").hidden = true;
+  // A click on the video would also toggle pause; make this click only unmute.
+  if (e?.type === "pointerdown" && e.target.closest?.(".stage")) swallowClick = true;
 }
 document.addEventListener("pointerdown", undoAutoMute, true);
+document.addEventListener("click", (e) => {
+  if (!swallowClick) return;
+  swallowClick = false;
+  e.preventDefault(); e.stopPropagation();
+  if (video.paused) video.play().catch(() => {});
+}, true);
 document.addEventListener("keydown", undoAutoMute, true);
 video.addEventListener("volumechange", () => {
   if (autoMuted) return;  // don't save the browser-forced mute
