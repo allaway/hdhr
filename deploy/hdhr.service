@@ -1,0 +1,29 @@
+[Unit]
+Description=hdhr - HDHomeRun live TV in the browser
+After=network-online.target
+Wants=network-online.target
+# Keep retrying if the tuner isn't reachable yet at boot.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Your own options (profile, device address, port) live here; see install.sh.
+EnvironmentFile=-/etc/default/hdhr
+ExecStart=/usr/bin/python3 /opt/hdhr/server.py --host 0.0.0.0 --workdir /run/hdhr $HDHR_ARGS
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+
+# Run as a throwaway unprivileged user. HLS segments go to /run/hdhr, which is
+# RAM-backed, so the constant segment writes don't wear out the SD card.
+DynamicUser=yes
+RuntimeDirectory=hdhr
+# Hardware video encoders (/dev/video*, /dev/dri/*).
+SupplementaryGroups=video render
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

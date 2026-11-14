@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Antenna TV</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='8' width='26' height='18' rx='3' fill='%234f9cff'/%3E%3Cpath d='M11 3l5 5 5-5' stroke='%234f9cff' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --panel2: #1c2029; --line: #262a33; --text: #e6e8ec;
@@ -203,6 +204,7 @@
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const video = $("v"), ov = $("ov");
+const VIEWER = Math.random().toString(36).slice(2, 10);  // lets the server tell viewers apart
 const store = {
   get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
@@ -466,26 +468,29 @@ function scrollGuideToNow() {
 function stopCurrent(release = true) {
   if (hls) { hls.destroy(); hls = null; }
   video.removeAttribute("src"); video.load();
-  if (current && release) navigator.sendBeacon(`/api/stop/${current}`);
+  if (current && release) navigator.sendBeacon(`/api/stop/${current}?c=${VIEWER}`);
 }
 
+let tuneSeq = 0;  // only the most recent tune() may attach a player
 async function tune(ch, force = false) {
   if (ch === current && !force) return;
+  const seq = ++tuneSeq;
   stopCurrent(ch !== current);  // retuning the same channel: keep the server stream
   video.controls = true;        // hidden until something is playing
   current = ch;
   frags = []; tunedAt = performance.now(); firstFrameMs = null; hist = {}; lastDropped = null;
   stalledFor = -20; lastPos = -1;  // grace period while tuning
+  released = false; pausedAt = 0;
   store.set("last", ch);
   renderNowPlaying();
   render(); renderGuide();
   document.querySelector("#list li.active")?.scrollIntoView({ block: "nearest" });
   overlay('<div><div class="spinner"></div>Tuning ' + ch + "…</div>");
 
-  const src = `/hls/${ch}/index.m3u8`;
+  const src = `/hls/${ch}/index.m3u8?c=${VIEWER}`;
   // Ask the server first so tuner errors come back as readable messages.
   const r = await fetch(src);
-  if (current !== ch) return;
+  if (seq !== tuneSeq) return;  // a newer tune (or retune) superseded this one
   if (!r.ok) {
     let msg = `Error ${r.status}`;
     try { msg = (await r.json()).error; } catch {}
@@ -493,14 +498,14 @@ async function tune(ch, force = false) {
   }
 
   if (window.Hls && Hls.isSupported()) {
-    hls = new Hls({ liveSyncDurationCount: 2, maxLiveSyncPlaybackRate: 1.1,
-                    manifestLoadingTimeOut: 30000 });
-    hls.on(Hls.Events.ERROR, (_, d) => {
-      if (!d.fatal) return;
-      if (d.type === Hls.ErrorTypes.MEDIA_ERROR) return hls.recoverMediaError();
+    const player = hls = new Hls({ liveSyncDurationCount: 2, maxLiveSyncPlaybackRate: 1.1,
+                                   manifestLoadingTimeOut: 30000 });
+    player.on(Hls.Events.ERROR, (_, d) => {
+      if (!d.fatal || player !== hls) return;  // ignore errors from a replaced player
+      if (d.type === Hls.ErrorTypes.MEDIA_ERROR) return player.recoverMediaError();
       // Network trouble (e.g. server restarted): retune after a moment.
       overlay('<div><div class="spinner"></div>Reconnecting…</div>');
-      setTimeout(() => { if (current === ch) tune(ch, true); }, 3000);
+      setTimeout(() => { if (player === hls) tune(ch, true); }, 3000);
     });
     hls.on(Hls.Events.FRAG_LOADED, (_, d) => {
       frags.push({ bytes: d.frag.stats.total, dur: d.frag.duration,
@@ -557,9 +562,41 @@ video.addEventListener("volumechange", () => {
 
 // Watchdog: if playback hasn't advanced for 12 s (stalled stream, server
 // restart, tuner hiccup), retune the same channel from scratch.
+// Don't transcode for nobody. The server already stops a stream ~30 s after
+// the last request; these cover tabs that are open but not being watched.
+// A paused video still fetches segments, so release it after a minute; a tab
+// left playing with no interaction for hours gets a "Still watching?" stop.
+const PAUSE_RELEASE_MS = 60_000, STILL_WATCHING_MS = 4 * 3600_000;
+let released = false, pausedAt = 0, lastInput = Date.now();
+
+function releaseStream(why) {
+  if (!current || released) return;
+  released = true;
+  stopCurrent(true);  // tells the server to stop ffmpeg and free the tuner
+  overlay(`<div>${why}<br><span style="font-size:13px">Click or press Space to resume</span></div>`);
+}
+function resumeIfReleased() {
+  if (!released || !current) return false;
+  tune(current, true);
+  return true;
+}
+video.addEventListener("pause", () => { pausedAt = Date.now(); });
+video.addEventListener("play", () => { pausedAt = 0; resumeIfReleased(); });
+document.querySelector(".stage").addEventListener("click", resumeIfReleased);
+for (const ev of ["pointerdown", "keydown"]) document.addEventListener(ev, () => { lastInput = Date.now(); }, true);
+setInterval(() => {
+  if (!current || released) return;
+  if (video.paused && pausedAt && Date.now() - pausedAt > PAUSE_RELEASE_MS) {
+    releaseStream("Paused. The stream was stopped to free the tuner.");
+  } else if (!video.paused && Date.now() - lastInput > STILL_WATCHING_MS) {
+    video.pause();
+    releaseStream("Still watching?");
+  }
+}, 5000);
+
 let lastPos = -1, stalledFor = 0;
 setInterval(() => {
-  if (!current || video.paused && video.readyState >= 2) { stalledFor = 0; return; }
+  if (!current || released || video.paused && video.readyState >= 2) { stalledFor = 0; return; }
   if (video.currentTime === lastPos) stalledFor += 2; else stalledFor = 0;
   lastPos = video.currentTime;
   if (stalledFor >= 12) { stalledFor = 0; tune(current, true); }
@@ -700,6 +737,10 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "i") toggleDebug();
   else if (e.key === "f") document.fullscreenElement ? document.exitFullscreen() : video.requestFullscreen();
   else if (e.key === "m") video.muted = !video.muted;
+  else if (e.key === " " && !e.target.closest?.("button")) {
+    e.preventDefault();
+    if (!resumeIfReleased()) video.paused ? video.play().catch(() => {}) : video.pause();
+  }
   else if (e.key === "g") toggleGuide();
   else if (e.key === "Escape") toggleGuide(false);
   else if (e.key === "/") { e.preventDefault(); $("q").focus(); }
@@ -709,7 +750,7 @@ $("q").addEventListener("input", () => { render(); renderGuide(); });
 $("favOnly").onclick = () => { favOnly = !favOnly; store.set("favOnly", favOnly); render(); renderGuide(); };
 $("guideBtn").onclick = () => toggleGuide();
 $("gNow").onclick = scrollGuideToNow;
-window.addEventListener("pagehide", () => { if (current) navigator.sendBeacon(`/api/stop/${current}`); });
+window.addEventListener("pagehide", () => { if (current) navigator.sendBeacon(`/api/stop/${current}?c=${VIEWER}`); });
 
 // Keep "now" info fresh: re-render every minute, refetch guide every 10.
 setInterval(() => { render(); renderNowPlaying(); renderGuide(); }, 60_000);

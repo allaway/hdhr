@@ -20,6 +20,20 @@ Options:
 - `--profile auto|full|balanced|lite`: transcoding quality vs CPU (see below)
 - `--encoder auto|videotoolbox|v4l2m2m|vaapi|x264`
 
+## Raspberry Pi / always-on server
+
+```sh
+git clone https://github.com/allaway/hdhr && cd hdhr
+sudo ./deploy/install.sh        # installs ffmpeg, copies to /opt/hdhr, starts the service
+```
+
+It runs as a systemd service (`hdhr`) on port 8080, reachable from your LAN and over a VPN such as WireGuard. Run the script again after `git pull` to update. Extra options go in `/etc/default/hdhr`, for example `HDHR_ARGS="--profile lite"`. Logs: `journalctl -u hdhr -f`.
+
+- **Segments live in RAM** (`/run/hdhr`), so constant HLS writes don't wear out the SD card. Use `--workdir` to choose another location.
+- **No internet needed to find the tuner.** Discovery uses the HDHomeRun's own LAN broadcast first and falls back to SiliconDust's cloud service. The guide still needs internet.
+- **No transcoding for nobody.** A stream stops when its last viewer changes channels or closes the page, or 30 s after the last request. A video paused for a minute releases its stream, and a tab left playing for 4 hours without interaction stops with a "Still watching?" prompt. Viewers on the same channel share one stream, and it keeps running until the last of them leaves.
+- There's no login, so keep it on your LAN or VPN rather than exposing port 8080 to the internet.
+
 ## Profiles and low-power devices
 
 Nearly all the CPU goes to deinterlacing and H.264 encoding. Decoding MPEG-2, converting audio, and the Python server itself are cheap. So the profiles trade output resolution and encoder effort:

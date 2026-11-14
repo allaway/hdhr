@@ -25,8 +25,9 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-WORK = Path(tempfile.mkdtemp(prefix="hdhr-web-"))
+WORK = Path(tempfile.gettempdir())  # replaced in main() with a private subdir
 IDLE_TIMEOUT = 30  # seconds without a playlist request before ffmpeg is stopped
+VIEWER_GRACE = 8   # a viewer counts as watching if it polled the playlist this recently
 CHANNEL_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
 
 
@@ -35,15 +36,64 @@ def fetch_json(url, timeout=5):
         return json.load(r)
 
 
+def discover_local(timeout=1.5):
+    """Find an HDHomeRun with its own LAN broadcast protocol (UDP 65001).
+
+    Works without internet access. Packet: type (u16 BE), payload length
+    (u16 BE), TLV payload, CRC-32 (u32 LE) over everything before it.
+    """
+    import socket
+    import struct
+    import zlib
+
+    def tlv(tag, value):
+        return bytes([tag, len(value)]) + value
+
+    payload = tlv(0x01, struct.pack(">I", 0x00000001))   # device type: tuner
+    payload += tlv(0x02, struct.pack(">I", 0xFFFFFFFF))  # device id: any
+    pkt = struct.pack(">HH", 0x0002, len(payload)) + payload  # discover request
+    pkt += struct.pack("<I", zlib.crc32(pkt) & 0xFFFFFFFF)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.settimeout(timeout)
+        s.sendto(pkt, ("255.255.255.255", 65001))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, (ip, _) = s.recvfrom(2048)
+            except OSError:
+                break
+            if len(data) < 8 or struct.unpack(">H", data[:2])[0] != 0x0003:
+                continue  # not a discover reply
+            body, pos, tags = data[4:-4], 0, {}
+            while pos + 2 <= len(body):
+                tag, ln = body[pos], body[pos + 1]
+                pos += 2
+                if ln & 0x80:  # two-byte length
+                    ln = (ln & 0x7F) | (body[pos] << 7)
+                    pos += 1
+                tags[tag] = body[pos:pos + ln]
+                pos += ln
+            base = tags.get(0x2A)  # base URL
+            return base.decode() if base else f"http://{ip}"
+    return None
+
+
 def discover():
-    """Find a device via SiliconDust's cloud discovery (same as their apps)."""
+    """Find a device on the LAN first, then via SiliconDust's cloud service."""
+    try:
+        if url := discover_local():
+            return url
+    except Exception as e:
+        print(f"local discovery failed: {e}", file=sys.stderr)
     try:
         devices = fetch_json("https://ipv4-api.hdhomerun.com/discover")
         for d in devices:
             if "LineupURL" in d:
                 return d["BaseURL"]
     except Exception as e:
-        print(f"discovery failed: {e}", file=sys.stderr)
+        print(f"cloud discovery failed: {e}", file=sys.stderr)
     return None
 
 
@@ -144,6 +194,7 @@ class Stream:
         self.dir = Path(tempfile.mkdtemp(prefix=f"{channel}-", dir=WORK))
         self.last_access = self.started = time.time()
         self.stopped = False
+        self.viewers = {}  # viewer id -> last playlist request (shared streams)
         self.log = open(self.dir / "ffmpeg.log", "w")
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
@@ -282,6 +333,19 @@ class Manager:
         if s:
             s.stop()
 
+    def leave(self, channel, viewer):
+        """A viewer left. Stop the stream only if nobody else is watching it."""
+        with self.lock:
+            s = self.streams.get(channel)
+            if not s:
+                return
+            s.viewers.pop(viewer, None)
+            now = time.time()
+            if any(now - t < VIEWER_GRACE for t in s.viewers.values()):
+                return  # someone else is still watching this channel
+            self.streams.pop(channel)
+        s.stop()
+
     def stop_all(self):
         with self.lock:
             for s in self.streams.values():
@@ -359,17 +423,20 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({"error": f"guide unavailable: {e}"}, 502)
         m = re.match(r"^/hls/([^/]+)/(index\.m3u8|seg\d+\.ts)$", path)
         if m:
-            return self.serve_hls(m.group(1), m.group(2))
+            viewer = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("c", ["anon"])[0]
+            return self.serve_hls(m.group(1), m.group(2), viewer)
         return super().do_GET()
 
     def do_POST(self):
-        m = re.match(r"^/api/stop/([^/]+)$", self.path)
+        u = urllib.parse.urlparse(self.path)
+        m = re.match(r"^/api/stop/([^/]+)$", u.path)
         if m:
-            self.mgr.stop(m.group(1))
+            viewer = urllib.parse.parse_qs(u.query).get("c", ["anon"])[0]
+            self.mgr.leave(m.group(1), viewer)
             return self.send_json({"ok": True})
         self.send_error(404)
 
-    def serve_hls(self, channel, name):
+    def serve_hls(self, channel, name, viewer="anon"):
         if not CHANNEL_RE.match(channel):
             return self.send_error(400)
         if name.endswith(".ts"):
@@ -381,6 +448,8 @@ class Handler(SimpleHTTPRequestHandler):
         s = self.mgr.get(channel)
         if s is None:
             return self.send_json({"error": "unknown channel"}, 404)
+        viewer = viewer[:64]
+        s.viewers[viewer] = time.time()  # counts as watching while it tunes, too
         deadline = time.time() + 25
         while not s.ready():
             if not s.alive and s.stopped:
@@ -411,6 +480,7 @@ class Handler(SimpleHTTPRequestHandler):
             if time.time() > deadline:
                 return self.send_json({"error": "timed out tuning channel"}, 504)
             time.sleep(0.25)
+        s.viewers[viewer] = time.time()
         self.send_file(s.dir / "index.m3u8", "application/vnd.apple.mpegurl")
 
 
@@ -426,10 +496,17 @@ def main():
     ap.add_argument("--encoder", default="auto",
                     choices=["auto", "videotoolbox", "v4l2m2m", "vaapi", "x264"],
                     help="H.264 encoder (auto: first working hardware encoder, else x264)")
+    ap.add_argument("--workdir", default=None,
+                    help="where HLS segments are written (default: system temp dir). "
+                         "On a Raspberry Pi use a RAM-backed dir such as /run/hdhr or "
+                         "/dev/shm to avoid wearing out the SD card")
     args = ap.parse_args()
 
     if not shutil.which("ffmpeg"):
-        sys.exit("ffmpeg not found on PATH (brew install ffmpeg)")
+        sys.exit("ffmpeg not found on PATH (macOS: brew install ffmpeg; "
+                 "Debian/Raspberry Pi OS: sudo apt install ffmpeg)")
+    global WORK
+    WORK = Path(tempfile.mkdtemp(prefix="hdhr-web-", dir=args.workdir))
     device = args.device or discover()
     if not device:
         sys.exit("No HDHomeRun found; pass --device http://<ip>")
@@ -449,7 +526,11 @@ def main():
     # even when launched in the background where SIGINT is ignored.
     signal.signal(signal.SIGINT, _quit)
     signal.signal(signal.SIGTERM, _quit)
-    print(f"Open http://{'localhost' if args.host == '127.0.0.1' else args.host}:{args.port}")
+    if args.host in ("0.0.0.0", "::"):
+        print(f"Listening on all interfaces, port {args.port} (open http://<this-machine>:{args.port})")
+    else:
+        print(f"Open http://{'localhost' if args.host == '127.0.0.1' else args.host}:{args.port}")
+    print(f"Segments in {WORK}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
