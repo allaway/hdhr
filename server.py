@@ -28,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 WORK = Path(tempfile.gettempdir())  # replaced in main() with a private subdir
 IDLE_TIMEOUT = 30  # seconds without a playlist request before ffmpeg is stopped
 VIEWER_GRACE = 8   # a viewer counts as watching if it polled the playlist this recently
+STALL_TIMEOUT = 20  # kill a stream that stops producing segments for this long
 CHANNEL_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
 
 
@@ -205,6 +206,7 @@ class Stream:
         self.last_access = self.started = time.time()
         self.stopped = False
         self.viewers = {}  # viewer id -> last playlist request (shared streams)
+        self.encoder = encoder
         self.log = open(self.dir / "ffmpeg.log", "w")
         transcode = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
@@ -246,6 +248,18 @@ class Stream:
     def returncode(self):
         return next((p.returncode for p in self.procs if p.returncode is not None), None)
 
+    def stalled(self):
+        """True if ffmpeg is alive but hasn't written a segment in a while.
+
+        Seen on a Raspberry Pi 4: the V4L2 encoder driver can wedge, leaving
+        ffmpeg blocked in the kernel forever. It never exits, so without this
+        the stream (and its tuner) would stay "busy" indefinitely.
+        """
+        segs = list(self.dir.glob("seg*.ts"))
+        newest = max((f.stat().st_mtime for f in segs), default=self.started)
+        limit = STALL_TIMEOUT if segs else STALL_TIMEOUT + 25  # allow time to tune
+        return time.time() - newest > limit
+
     def ready(self):
         pl = self.dir / "index.m3u8"
         return pl.exists() and pl.read_text().count("#EXTINF") >= 2
@@ -274,7 +288,13 @@ class Stream:
                 p.wait(3)
             except subprocess.TimeoutExpired:
                 p.kill()
-                p.wait()
+                try:
+                    p.wait(2)
+                except subprocess.TimeoutExpired:
+                    # stuck in the kernel (e.g. a wedged hardware encoder);
+                    # it will be reaped when it finally dies
+                    print(f"ch {self.channel}: ffmpeg pid {p.pid} won't exit "
+                          f"(stuck in the kernel?)", flush=True)
         self.log.close()
         shutil.rmtree(self.dir, ignore_errors=True)
 
@@ -327,6 +347,15 @@ class Manager:
                 return c["URL"]
         return None
 
+    def encoder_for_new_stream(self):
+        """The Pi 4's V4L2 encoder wedged (process stuck in the kernel) when a
+        second session started while one was running, so on V4L2 only one
+        stream uses the hardware; others use software x264 at 720p."""
+        if self.encoder.name == "v4l2m2m" and any(
+                s.encoder.name == "v4l2m2m" for s in self.streams.values()):
+            return Encoder("x264", "lite")
+        return self.encoder
+
     def get(self, channel):
         """Return a running Stream for channel, starting one if needed."""
         with self.lock:
@@ -346,7 +375,7 @@ class Manager:
                     old = min(self.streams.values(), key=lambda x: x.last_access)
                     old.stop()
                     del self.streams[old.channel]
-                s = Stream(channel, url, self.encoder)
+                s = Stream(channel, url, self.encoder_for_new_stream())
                 self.streams[channel] = s
             s.last_access = time.time()
             return s
@@ -386,13 +415,18 @@ class Manager:
         while True:
             time.sleep(5)
             now = time.time()
+            doomed = []
             with self.lock:
                 for ch, s in list(self.streams.items()):
-                    if now - s.last_access > IDLE_TIMEOUT or not s.alive:
-                        if not s.alive:
-                            s.report("exited mid-stream")
-                        s.stop()
-                        del self.streams[ch]
+                    if not s.alive:
+                        s.report("exited mid-stream")
+                    elif s.stalled():
+                        s.report(f"stalled (no new segment for {STALL_TIMEOUT}s+)")
+                    elif now - s.last_access <= IDLE_TIMEOUT:
+                        continue
+                    doomed.append(self.streams.pop(ch))
+            for s in doomed:  # outside the lock: stopping can take seconds
+                s.stop()
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -440,6 +474,8 @@ class Handler(SimpleHTTPRequestHandler):
                 tuners = {"error": str(e)}
             return self.send_json({"tuners": tuners, "encoder": self.mgr.encoder.args,
                                    "profile": str(self.mgr.encoder),
+                                   "streams": {ch: {"profile": str(s.encoder), "args": s.encoder.args}
+                                               for ch, s in self.mgr.streams.items()},
                                    "active": list(self.mgr.streams)})
         if path == "/api/guide":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)

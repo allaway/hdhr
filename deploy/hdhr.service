@@ -13,6 +13,9 @@ ExecStart=/usr/bin/python3 /opt/hdhr/server.py --host 0.0.0.0 --workdir /run/hdh
 Environment=PYTHONUNBUFFERED=1
 Restart=on-failure
 RestartSec=5
+# Don't hang for minutes on restart if an ffmpeg is stuck in the kernel
+# (seen with the Pi 4's hardware encoder); give up waiting after 10 s.
+TimeoutStopSec=10
 
 # Run as a throwaway unprivileged user. HLS segments go to /run/hdhr, which is
 # RAM-backed, so the constant segment writes don't wear out the SD card.

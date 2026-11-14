@@ -675,7 +675,8 @@ async function updateDebug() {
   const q = video.getVideoPlaybackQuality?.();
   const buf = video.buffered.length ? video.buffered.end(video.buffered.length - 1) - video.currentTime : 0;
   const lvl = hls?.levels?.[0];
-  const enc = (st.encoder || []);
+  const mine = st.streams?.[current];  // this stream may use a different encoder
+  const enc = mine?.args || st.encoder || [];
   const encArg = (k) => { const i = enc.indexOf(k); return i >= 0 ? enc[i + 1] : "—"; };
 
   // record one sample per second for the plots
@@ -707,7 +708,7 @@ async function updateDebug() {
     "│" + row("sig qual", "sigq", P, 0, 100),
     "│",
     "├─ TRANSCODE · ffmpeg " + "─".repeat(HIST_N - 4),
-    `│ profile   ${st.profile ?? "—"}   ${encArg("-c:v")}` +
+    `│ profile   ${mine?.profile ?? st.profile ?? "—"}   ${encArg("-c:v")}` +
       (encArg("-b:v") !== "—" ? `  target ${encArg("-b:v")}` : `  crf ${encArg("-crf")} ${encArg("-preset")}`) +
       `  max ${encArg("-maxrate")}` +
       (lastFrag ? `   seg load ${lastFrag.ms.toFixed(0)} ms` : ""),
