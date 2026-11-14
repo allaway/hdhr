@@ -147,6 +147,16 @@ class Encoder:
     def hardware(self):
         return self.name != "x264"
 
+    @property
+    def two_stage(self):
+        # The Raspberry Pi's V4L2 encoder emits SPS/PPS only once, so segments
+        # after the first can't be decoded by a browser joining mid-stream.
+        # Encoding to an MPEG-TS pipe and re-muxing with a second ffmpeg fixes
+        # it: that ffmpeg learns SPS/PPS from the first frame and its muxer
+        # repeats them before every keyframe. (Measured on a Pi 4: 1.52x
+        # real time for 1080i, segments joinable; single-stage: not joinable.)
+        return self.name == "v4l2m2m"
+
     def __str__(self):
         return f"{self.name}/{self.profile}"
 
@@ -196,7 +206,7 @@ class Stream:
         self.stopped = False
         self.viewers = {}  # viewer id -> last playlist request (shared streams)
         self.log = open(self.dir / "ffmpeg.log", "w")
-        cmd = [
+        transcode = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
             "-fflags", "+genpts+discardcorrupt",
             *encoder.pre_input,
@@ -209,17 +219,32 @@ class Stream:
             # so audio timestamps stay continuous and playback doesn't stutter.
             "-af", "aresample=async=1000:first_pts=0",
             "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+        ]
+        hls_out = [
             "-f", "hls", "-hls_time", "2", "-hls_list_size", "10",
             "-hls_flags", "delete_segments+independent_segments+omit_endlist",
             "-hls_segment_filename", str(self.dir / "seg%05d.ts"),
             str(self.dir / "index.m3u8"),
         ]
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
-                                     stdout=subprocess.DEVNULL, stderr=self.log)
+        if encoder.two_stage:
+            enc = subprocess.Popen(transcode + ["-f", "mpegts", "-"], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=self.log)
+            mux = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "warning",
+                                    "-f", "mpegts", "-i", "-", "-c", "copy", *hls_out],
+                                   stdin=enc.stdout, stdout=subprocess.DEVNULL, stderr=self.log)
+            enc.stdout.close()  # the muxer owns the read end now
+            self.procs = [enc, mux]
+        else:
+            self.procs = [subprocess.Popen(transcode + hls_out, stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.DEVNULL, stderr=self.log)]
 
     @property
     def alive(self):
-        return self.proc.poll() is None
+        return all(p.poll() is None for p in self.procs)
+
+    @property
+    def returncode(self):
+        return next((p.returncode for p in self.procs if p.returncode is not None), None)
 
     def ready(self):
         pl = self.dir / "index.m3u8"
@@ -234,17 +259,22 @@ class Stream:
     def report(self, why):
         """Log an unexpected ffmpeg exit to the console (the work dir is deleted)."""
         print(f"[{time.strftime('%H:%M:%S')}] ch {self.channel}: ffmpeg {why}, "
-              f"exit code {self.proc.returncode}, ran {time.time() - self.started:.0f}s; "
+              f"exit code {self.returncode}, ran {time.time() - self.started:.0f}s; "
               f"log: {self.error_text() or '(empty)'}", flush=True)
 
     def stop(self):
         self.stopped = True
-        if self.alive:
-            self.proc.send_signal(signal.SIGINT)
+        # Interrupt the first process; in two-stage mode the muxer then sees
+        # end-of-input and finishes on its own.
+        first = self.procs[0]
+        if first.poll() is None:
+            first.send_signal(signal.SIGINT)
+        for p in self.procs:
             try:
-                self.proc.wait(3)
+                p.wait(3)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
+                p.kill()
+                p.wait()
         self.log.close()
         shutil.rmtree(self.dir, ignore_errors=True)
 
@@ -462,7 +492,7 @@ class Handler(SimpleHTTPRequestHandler):
                 time.sleep(0.25)
                 continue
             if not s.alive:
-                msg = s.error_text() or f"ffmpeg exited (code {s.proc.returncode})"
+                msg = s.error_text() or f"ffmpeg exited (code {s.returncode})"
                 s.report("failed while tuning")
                 self.mgr.stop(channel)
                 if "503" in msg:

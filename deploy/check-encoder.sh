@@ -41,7 +41,7 @@ report() {  # name, rc, t0, outdir
   fi
   # a later segment decoded on its own = what a browser joining mid-stream sees
   if ! ffmpeg -v error -i "$seg" -f null - 2>&1 | grep -q "non-existing PPS\|no frame"; then joinable="yes"; fi
-  res=$(ffprobe -v error -select_streams v -show_entries stream=width,height -of csv=p=0:s=x "$seg" | head -1)
+  res=$(ffprobe -v error -select_streams v -show_entries stream=width,height -of csv=p=0:s=x "$seg" 2>/dev/null | head -1)
   local kbps=$(( $(wc -c < "$seg") * 8 / 2000 ))
   printf "%-26s joinable=%-3s  %-9s  speed=%sx  %s kbps\n" "$name" "$joinable" "${res:-?}" "$speed" "$kbps"
 }
