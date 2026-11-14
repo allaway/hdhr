@@ -10,9 +10,19 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 cd "$(dirname "$0")/.."
 
-echo "==> Installing ffmpeg and python3"
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends ffmpeg python3
+if command -v ffmpeg >/dev/null && command -v python3 >/dev/null; then
+  echo "==> ffmpeg and python3 already installed"
+else
+  echo "==> Installing ffmpeg and python3"
+  # An unrelated broken/changed apt source (e.g. a third-party repo that
+  # renamed its release) shouldn't block the install: warn and carry on with
+  # the package lists already on this machine.
+  if ! apt-get update -qq; then
+    echo "warning: 'apt-get update' failed (see above); trying with existing package lists." >&2
+    echo "         If a repo changed its codename, fix with: sudo apt-get update --allow-releaseinfo-change-codename" >&2
+  fi
+  apt-get install -y -qq --no-install-recommends ffmpeg python3
+fi
 
 echo "==> Copying app to /opt/hdhr"
 install -d /opt/hdhr
